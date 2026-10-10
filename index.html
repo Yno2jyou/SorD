@@ -3340,12 +3340,19 @@
       }
 
       function observeAll() {
+        // サイドバー目次は IntersectionObserver に頼らず即表示する。
+        // （最後の項目が画面下端 8% の除外帯に入って交差判定を満たせず、opacity:0 のまま残るため）
+        document.querySelectorAll("#sidebar-toc > li").forEach(function (el, idx) {
+          if (el.classList.contains("is-in")) return;
+          if (!reduce) el.style.transitionDelay = Math.min(idx * 0.04, 0.6) + "s";
+          markIn(el);
+        });
         if (reduce) {
-          document.querySelectorAll(".reveal, .display-mega, #toc > li, #sidebar-toc > li").forEach(markIn);
+          document.querySelectorAll(".reveal, .display-mega, #toc > li").forEach(markIn);
           return;
         }
         if (!("IntersectionObserver" in window)) {
-          document.querySelectorAll(".reveal, .display-mega, #toc > li, #sidebar-toc > li").forEach(markIn);
+          document.querySelectorAll(".reveal, .display-mega, #toc > li").forEach(markIn);
           return;
         }
         if (io) io.disconnect();
@@ -3364,7 +3371,7 @@
           });
         }, { root: null, rootMargin: "0px 0px -8% 0px", threshold: 0.12 });
 
-        document.querySelectorAll(".reveal, .display-mega, #toc > li, #sidebar-toc > li").forEach(function (el) {
+        document.querySelectorAll(".reveal, .display-mega, #toc > li").forEach(function (el) {
           if (el.classList.contains("is-in")) return;
           io.observe(el);
         });
