@@ -91,8 +91,7 @@
       min-height: -webkit-fill-available;
       z-index: 0;
       pointer-events: none;
-      opacity: var(--dawn, 0);
-      transition: opacity 0.25s linear;
+      opacity: 0; /* JS が scroll 時に直接書き込む（CSS変数経由だと全体の再計算が走るため） */
       -webkit-transform: translate3d(0, 0, 0);
       transform: translate3d(0, 0, 0);
       -webkit-backface-visibility: hidden;
@@ -118,7 +117,8 @@
     }
     /* iOS Safari: fixed レイヤーの途中欠け防止（visualViewport で高さをJS同期） */
     @supports (-webkit-touch-callout: none) {
-      #dawn-layer {
+      #dawn-layer,
+      #sky-stars {
         /* inset ではなく top/left/width/height を JS が上書き */
         right: auto;
         bottom: auto;
@@ -182,26 +182,37 @@
       background-size: 100% 100%;
     }
 
-    .sky-star {
+    /* 星は1つの固定レイヤーにまとめ、scroll 時はこのレイヤーの opacity だけを動かす */
+    #sky-stars {
       position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      height: 100dvh;
+      min-height: 100vh;
+      min-height: -webkit-fill-available;
+      z-index: 0;
+      pointer-events: none;
+      overflow: hidden;
+      -webkit-transform: translate3d(0, 0, 0);
+      transform: translate3d(0, 0, 0);
+      will-change: opacity;
+    }
+    .sky-star {
+      position: absolute;
       border-radius: 50%;
       pointer-events: none;
-      z-index: 0;
       background: #fff;
-      /* will-change を付けない（多数要素で重い） */
-    }
-    .sky-star.twinkle {
-      animation-name: star-twinkle;
-      animation-timing-function: ease-in-out;
-      animation-iteration-count: infinite;
+      /* 個別の will-change / translateZ は付けない（星ごとにレイヤーができて重い） */
     }
     @media (prefers-reduced-motion: reduce) {
       .sky-star.twinkle { animation: none !important; }
       .shooting-star, .shooting-star.is-flying, .shooting-star.is-flying::after { animation: none !important; display: none !important; }
     }
     @keyframes star-twinkle {
-      0%, 100% { opacity: calc(var(--dim, 0.25) * var(--star-mul, 1)); }
-      50%      { opacity: calc(var(--bright, 0.9) * var(--star-mul, 1)); }
+      0%, 100% { opacity: var(--dim, 0.25); }
+      50%      { opacity: var(--bright, 0.9); }
     }
 
     /* Reading progress bar */
@@ -217,9 +228,11 @@
     }
     .read-progress-bar {
       height: 100%;
-      width: 0%;
+      width: 100%;
       background: linear-gradient(90deg, hsl(var(--accent)), #a8c0d8);
-      transition: width 0.12s linear;
+      transform: scaleX(0);
+      transform-origin: left center;
+      will-change: transform;
       opacity: 0.9;
     }
 
@@ -241,9 +254,9 @@
       position: absolute;
       top: 50%;
       right: 1px;
-      width: 0;
+      width: 110px;
       height: 1.5px;
-      transform: translateY(-50%);
+      transform: translateY(-50%) scaleX(0);
       transform-origin: right center;
       background: linear-gradient(
         to left,
@@ -274,10 +287,10 @@
       }
     }
     @keyframes shoot-trail {
-      0%   { width: 0; opacity: 0; }
-      8%   { width: 55px; opacity: 1; }
-      50%  { width: 110px; opacity: 0.8; }
-      100% { width: 28px; opacity: 0; }
+      0%   { transform: translateY(-50%) scaleX(0);    opacity: 0; }
+      8%   { transform: translateY(-50%) scaleX(0.5);  opacity: 1; }
+      50%  { transform: translateY(-50%) scaleX(1);    opacity: 0.8; }
+      100% { transform: translateY(-50%) scaleX(0.25); opacity: 0; }
     }
 
     /* Custom classes from original design */
@@ -662,7 +675,6 @@
       #dawn-layer,
       body::before,
       body::after,
-      .sky-star,
       .shooting-star {
         -webkit-transform: translateZ(0);
         transform: translateZ(0);
@@ -696,10 +708,8 @@
       left: 0;
       right: 0;
       z-index: 50;
-      background: hsl(222 45% 4% / 0.88) !important;
-      /* blur はモバイルで重いので弱める */
-      backdrop-filter: blur(4px);
-      -webkit-backdrop-filter: blur(4px);
+      background: hsl(222 45% 4% / 0.92) !important;
+      /* backdrop-filter は fixed + スクロール下地で毎フレーム再ぼかしになるため使わない */
       border-bottom: 1px solid hsl(var(--foreground) / 0.1);
       padding: 0.75rem 1.5rem;
       display: flex;
@@ -3410,31 +3420,63 @@
     // ========== NIGHT SKY / DAWN / SHOOTING STARS ==========
     (function initSkyEffects() {
       var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      var isIOS = /\b(iPhone|iPad|iPod)\b/.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      var lowPower = (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) ||
+        (window.matchMedia && window.matchMedia("(max-width: 768px)").matches);
+
+      var progressBar = document.getElementById("read-progress-bar");
+      var dawnLayer = document.getElementById("dawn-layer");
+      var skyLayer = null;
+      var skyHidden = false;
+      var currentDawn = 0;
+      var lastStarStep = -1;
+      var maxScroll = 0;
+      var ticking = false;
+      var hasRO = "ResizeObserver" in window;
 
       function createSkyStars() {
-        var n = 110;
+        var total = lowPower ? 70 : 110;
+        // 瞬く星は一部だけ（全部を動かすとレイヤーとアニメが増えて重い）
+        var twinkleN = reduceMotion ? 0 : (lowPower ? 24 : 48);
+        skyLayer = document.createElement("div");
+        skyLayer.id = "sky-stars";
+        skyLayer.setAttribute("aria-hidden", "true");
         var frag = document.createDocumentFragment();
-        for (var i = 0; i < n; i++) {
+        for (var i = 0; i < total; i++) {
           var el = document.createElement("span");
-          el.className = reduceMotion ? "sky-star" : "sky-star twinkle";
+          el.className = "sky-star";
           var size = Math.random() < 0.22 ? (1.8 + Math.random() * 1.2) : (1.0 + Math.random() * 1.0);
           el.style.width = size + "px";
           el.style.height = size + "px";
-          el.style.left = (Math.random() * 100) + "vw";
-          el.style.top = (Math.random() * 100) + "vh";
+          el.style.left = (Math.random() * 100) + "%";
+          el.style.top = (Math.random() * 100) + "%";
           if (size > 1.5) {
             el.style.boxShadow = "0 0 " + (2 + Math.random() * 2) + "px rgba(220,230,255,0.55)";
           } else {
             el.style.boxShadow = "0 0 1px rgba(255,255,255,0.35)";
           }
-          var duration = 2.2 + Math.random() * 5.5;
-          el.style.animationDuration = duration + "s";
-          el.style.animationDelay = (-Math.random() * duration) + "s";
-          el.style.setProperty("--dim", String(0.18 + Math.random() * 0.25));
-          el.style.setProperty("--bright", String(0.55 + Math.random() * 0.4));
+          var dim = 0.18 + Math.random() * 0.25;
+          var bright = 0.55 + Math.random() * 0.4;
+          if (i < twinkleN && el.animate) {
+            // Web Animations: opacity のみ → コンポジタ上で動く（CSS変数 calc を使わない）
+            var duration = (2.2 + Math.random() * 5.5) * 1000;
+            el.style.opacity = dim;
+            el.animate(
+              [
+                { opacity: dim, easing: "ease-in-out" },
+                { opacity: bright, easing: "ease-in-out" },
+                { opacity: dim }
+              ],
+              { duration: duration, delay: -Math.random() * duration, iterations: Infinity }
+            );
+          } else {
+            el.style.opacity = (dim + (bright - dim) * 0.45).toFixed(2);
+          }
           frag.appendChild(el);
         }
-        document.body.appendChild(frag);
+        skyLayer.appendChild(frag);
+        document.body.appendChild(skyLayer);
       }
 
       function spawnShootingStar() {
@@ -3459,65 +3501,108 @@
       function scheduleShootingStars() {
         if (reduceMotion) return;
         setTimeout(function () {
-          var dawn = parseFloat(getComputedStyle(document.body).getPropertyValue("--dawn")) || 0;
-          if (dawn < 0.92) spawnShootingStar();
+          // getComputedStyle を使わず、保持している値を参照
+          if (!document.hidden && currentDawn < 0.92) spawnShootingStar();
           scheduleShootingStars();
         }, 12000 + Math.random() * 8000);
       }
 
-      var progressBar = document.getElementById("read-progress-bar");
-      var dawnLayer = document.getElementById("dawn-layer");
-      var isIOS = /\b(iPhone|iPad|iPod)\b/.test(navigator.userAgent) ||
-        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-
       // Safari: アドレスバー伸縮で fixed レイヤーが画面半分しか塗らない問題を回避
-      function syncDawnLayerToVisualViewport() {
-        if (!dawnLayer) return;
+      // 値が変わったときだけ書く（毎スクロールで layout を起こさない）
+      var lastVVKey = "";
+      function syncLayersToVisualViewport() {
         var vv = window.visualViewport;
+        var key, t, l, w, h;
         if (vv) {
-          dawnLayer.style.top = vv.offsetTop + "px";
-          dawnLayer.style.left = vv.offsetLeft + "px";
-          dawnLayer.style.width = vv.width + "px";
-          dawnLayer.style.height = vv.height + "px";
+          t = vv.offsetTop + "px"; l = vv.offsetLeft + "px";
+          w = vv.width + "px"; h = vv.height + "px";
         } else {
-          dawnLayer.style.top = "0px";
-          dawnLayer.style.left = "0px";
-          dawnLayer.style.width = "100%";
-          dawnLayer.style.height = window.innerHeight + "px";
+          t = "0px"; l = "0px"; w = "100%"; h = window.innerHeight + "px";
         }
+        key = t + "|" + l + "|" + w + "|" + h;
+        if (key === lastVVKey) return;
+        lastVVKey = key;
+        [dawnLayer, skyLayer].forEach(function (layer) {
+          if (!layer) return;
+          layer.style.top = t;
+          layer.style.left = l;
+          layer.style.width = w;
+          layer.style.height = h;
+        });
       }
 
-      function updateDawn() {
+      // スクロール可能量は scroll ごとに測らずキャッシュ（resize / 本文高さの変化時のみ再計測）
+      function measure() {
+        var el = document.documentElement;
+        maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+      }
+
+      function applyScroll() {
+        ticking = false;
+        if (!hasRO) measure();
         var el = document.documentElement;
         var scrollTop = window.pageYOffset || el.scrollTop || 0;
-        var height = el.scrollHeight - el.clientHeight;
-        var pct = height > 0 ? Math.min(100, Math.max(0, (scrollTop / height) * 100)) : 0;
-        if (progressBar) progressBar.style.width = pct.toFixed(1) + "%";
-        var t = pct / 100;
-        var dawn = t * t;
+        var pct = maxScroll > 0 ? Math.min(1, Math.max(0, scrollTop / maxScroll)) : 0;
+        var dawn = pct * pct;
         if (dawn < 0.015) dawn = 0;
         if (dawn > 1) dawn = 1;
+        currentDawn = dawn;
         var starMul = Math.max(0.05, 1 - dawn * 0.95);
-        document.body.style.setProperty("--dawn", dawn.toFixed(4));
-        document.body.style.setProperty("--star-mul", starMul.toFixed(4));
-        if (isIOS) syncDawnLayerToVisualViewport();
+
+        // すべて transform / opacity のみ（layout・paint を起こさない）
+        if (progressBar) progressBar.style.transform = "scaleX(" + pct.toFixed(4) + ")";
+        if (dawnLayer) dawnLayer.style.opacity = dawn.toFixed(3);
+        if (skyLayer) {
+          skyLayer.style.opacity = starMul.toFixed(3);
+          var hide = starMul <= 0.0501;
+          if (hide !== skyHidden) {
+            skyHidden = hide;
+            skyLayer.style.visibility = hide ? "hidden" : "visible";
+          }
+        }
+        // body 擬似要素の星用 --star-mul は 5% 刻みでしか書かない（全体のスタイル再計算を最小化）
+        var step = Math.round(starMul * 20);
+        if (step !== lastStarStep) {
+          lastStarStep = step;
+          document.body.style.setProperty("--star-mul", (step / 20).toFixed(2));
+        }
+        if (isIOS) syncLayersToVisualViewport();
+      }
+
+      function scheduleUpdate() {
+        if (ticking) return;
+        ticking = true;
+        requestAnimationFrame(applyScroll);
       }
 
       createSkyStars();
       scheduleShootingStars();
-      window.addEventListener("scroll", updateDawn, { passive: true });
-      window.addEventListener("resize", updateDawn);
+
+      window.addEventListener("scroll", scheduleUpdate, { passive: true });
+      window.addEventListener("resize", function () {
+        measure();
+        scheduleUpdate();
+      }, { passive: true });
+      if (hasRO) {
+        // 章の再描画・フォント読込・画面切替で本文高さが変わったら再計測
+        new ResizeObserver(function () {
+          measure();
+          scheduleUpdate();
+        }).observe(document.body);
+      }
       if (window.visualViewport) {
         window.visualViewport.addEventListener("resize", function () {
-          syncDawnLayerToVisualViewport();
-          updateDawn();
+          syncLayersToVisualViewport();
+          measure();
+          scheduleUpdate();
         }, { passive: true });
         window.visualViewport.addEventListener("scroll", function () {
-          syncDawnLayerToVisualViewport();
+          syncLayersToVisualViewport();
         }, { passive: true });
       }
-      syncDawnLayerToVisualViewport();
-      updateDawn();
+      syncLayersToVisualViewport();
+      measure();
+      applyScroll();
     })();
   </script>
 
